@@ -1,0 +1,1308 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(minfi)
+library(minfiData)
+library(ENmix)
+library(FlowSorted.Blood.EPIC)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(ggplot2)
+library(ggpubr)
+library(IlluminaHumanMethylationEPICmanifest)
+library(dplyr)
+library(limma)
+library(ewastools)
+library(data.table)
+library(reshape2)  # For melting the data frame
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+require(grid)
+library(qqman)
+library(table1)
+library(sesame)
+library(ExperimentHub)
+library("sesameData")
+library(RPMM)
+library(doParallel)
+sesameDataCache()
+
+```
+
+```{r}
+setwd("/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Methylation/combined")
+
+# Location of idat files
+idat <- "/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Methylation/combined"
+
+```
+
+By default it works for human, you have to set something else to have it work for mice
+```{r}
+betas = openSesame(idat, func = getBetas) 
+```
+
+Loading the annotation information 
+```{r}
+load("/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Methylation/Annotation/EPIC.hg19.manifest.RDATA")
+load("/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Methylation/Annotation/FlowSorted.BloodExtended.EPIC.compTable.rda")
+attach(annotation)
+
+
+```
+
+Subsetting the probes -- Go back and look at the use var and make sure that we drop the sex data
+```{r}
+use = annotation %>% filter(MASK_general == "FALSE" & NonCpG == "FALSE" & SexProbe == "FALSE")
+use<-use$probeID
+beta_subset<-betas[use,]
+#mvals = minfi::getM(beta_subset)
+```
+
+Getting all of the files together 
+```{r}
+beta_files = mclapply(searchIDATprefixes("."),readIDATpair,mc.cores = 2)
+```
+
+Infering patient sex, age, and ethenicty 
+```{r message=FALSE, warning=FALSE, include=FALSE}
+targets = NULL
+idat_file <- "/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Methylation/combined/sample_sheet"
+targets <- read.metharray.sheet(idat_file)
+genders = NULL
+
+
+for(i in 1:length(beta_files)){
+  genders[i] = inferSex(beta_files[[i]])
+  
+}
+targets = cbind(targets,genders)
+
+ethnicity = NULL
+
+for(i in 1:length(beta_files)){
+  ethnicity[i] = inferEthnicity(beta_files[[i]])
+  
+}
+
+
+#infer age
+ages = methyAge(beta_subset)
+```
+
+
+Attaching the different pieces of information to the dataframe.
+```{r}
+age = ages$mAge_Hovath
+targets = cbind(targets,age)
+
+colnames(ages)
+targets = cbind(targets,ethnicity)
+
+
+
+Age<-ages$mAge_Hovath
+Sex<-factor(targets$genders)
+Condition = factor(targets$Condition)
+Cell_Type = factor(targets$Cell)
+Patient = factor(targets$Patient)
+
+```
+### Make sure to drop sex chromasomes if you have not, when you do the filtering.
+
+Examine SNP's
+
+# 1. Extract SNP Probes information
+```{r}
+manifest <- getManifest(IlluminaHumanMethylationEPICmanifest)
+
+```
+
+# 1. Extract SNP Probes
+```{r include=FALSE}
+# Extract TypeSnpI data from the manifest
+typeSnpI_data <- get("TypeSnpI", envir = manifest@data)
+
+# Extract TypeSnpII data from the manifest
+typeSnpII_data <- get("TypeSnpII", envir = manifest@data)
+
+# Display the first few rows of TypeSnpI data to inspect
+head(typeSnpI_data)
+
+# Display the first few rows of TypeSnpII data to inspect
+head(typeSnpII_data)
+```
+
+
+Extract the type 1 and type 2 snp's 
+```{r}
+# Extracting rsIDs from both TypeSnpI and TypeSnpII data
+snpI_ids <- typeSnpI_data$Name
+snpII_ids <- typeSnpII_data$Name
+
+# Combining the rsIDs
+combined_snp_ids <- c(snpI_ids, snpII_ids)
+
+# Subsetting the betas matrix using these rsIDs
+snp_betas <- betas[combined_snp_ids, ]
+
+# Check the dimensions of the snp_betas matrix
+dim(snp_betas)
+
+```
+
+
+# 2. Calculate distances between samples
+```{r}
+distances <- dist(t(snp_betas), method = "euclidean")
+```
+
+# 3. Hierarchical clustering
+```{r}
+hc <- hclust(distances)
+dend <- as.dendrogram(hc)
+
+```
+# 4. Generate heatmap
+
+```{r}
+heatmap(as.matrix(snp_betas[, order.dendrogram(dend)]), 
+        Rowv = NA, 
+        Colv = NA, 
+        col = colorRampPalette(c("blue", "white", "red"))(256),
+        scale = "row", 
+        labRow = rownames(snp_betas),
+        labCol = colnames(snp_betas)[order.dendrogram(dend)],
+        xlab = "Samples", 
+        ylab = "SNP Probes",
+        main = "SNP Beta Values")
+```
+
+Replace the names with the CF
+```{r}
+# Create a named vector to map sample names to SubjectIDs
+name_map <- setNames(targets$SubjectID, rownames(targets))
+
+# Update the column names of snp_betas using the mapping
+snp_betas <- `colnames<-`(snp_betas, name_map[colnames(snp_betas)])
+
+# Generate the heatmap as before
+dend <- as.dendrogram(hc)
+heatmap(as.matrix(snp_betas[, order.dendrogram(dend)]), 
+        Rowv = NA, 
+        Colv = NA, 
+        col = colorRampPalette(c("blue", "white", "red"))(256),
+        scale = "row", 
+        labRow = rownames(snp_betas),
+        labCol = colnames(snp_betas)[order.dendrogram(dend)],
+        xlab = "ID", 
+        ylab = "SNP Probes",
+        main = "SNP Beta Values")
+```
+Looking to make sure that what I have is in agreement with the celltype inferred. 
+```{r}
+o_call_genotypes = call_genotypes(snp_betas, learn = FALSE, maxiter = 50)
+agreement = check_snp_agreement(o_call_genotypes,donor_ids = targets$SubjectID,sample_ids = rownames(targets))
+enumerate_sample_donors(o_call_genotypes)
+agreement
+
+# Convert agreement list to a data frame
+agreement_df <- rbindlist(agreement)
+
+# Join the targets data frame based on donor1
+agreement_df <- left_join(agreement_df, 
+                          targets %>% dplyr::select(FileName, Cell), 
+                          by = c("sample1" = "FileName")) %>%
+  rename(Cell1 = Cell)
+
+# Join the targets data frame based on donor2
+agreement_df <- left_join(agreement_df, 
+                          targets %>% dplyr::select(FileName, Cell), 
+                          by = c("sample2" = "FileName")) %>%
+  rename(Cell2 = Cell)
+
+write.csv(agreement_df, "/Users/adiallo/Desktop/sample_agreement.csv", row.names=FALSE)
+```
+
+12 Cell types:
+```{r}
+RGset <- read.metharray.exp(idat,force = TRUE)
+
+MSet_noob <- preprocessNoob(RGset)
+beta_matrix<-getBeta(MSet_noob)
+
+
+#EPIC
+Pred_EPIC <- projectCellType_CP(beta_matrix[rownames(FlowSorted.BloodExtended.EPIC.compTable),], 
+                                FlowSorted.BloodExtended.EPIC.compTable,lessThanOne =T)*100
+Pred_EPIC
+
+write.table(Pred_EPIC,file="/Users/adiallo/Desktop/Pred_EPIC.txt",sep = "\t")
+#450K
+Pred_450K <- projectCellType_CP(beta_matrix[rownames(IDOLOptimizedCpGs450klegacy.compTable),], 
+                                IDOLOptimizedCpGs450klegacy.compTable,lessThanOne =T)*100
+
+write.table(Pred_450K,file="/Users/adiallo/Desktop/Pred_450k.txt",sep = "\t")
+
+write.csv(targets, "/Users/adiallo/Desktop/Sample_sheet_infered_data.csv", row.names=FALSE)
+
+
+install.packages("ggplot2")
+install.packages("reshape2")
+library(ggplot2)
+library(reshape2)
+
+# Reshape data into long format
+long_data <- melt(Pred_EPIC)
+
+# Generate heatmap
+ggplot(long_data, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Sample", y = "Cell Type", fill = "Percentage")
+
+```
+
+
+```{r}
+#include the person in the model, so CF ID
+#Think about adjusting for cell type also
+design <- model.matrix(~0+Condition+Age+Sex)#adjusted for age,sex
+colnames(design) <- c(levels(Condition),"Age",levels(Sex)[-1])
+
+fit1 <- lmFit(beta_subset, design)
+
+
+contMatrix1 <- makeContrasts(Post_Drug-Baseline,levels = design)
+
+fit2 <- contrasts.fit(fit1, contMatrix1)
+fit2 <- eBayes(fit2)
+
+
+# look at the numbers of differentially methylated CpGs at FDR < 0.05
+summary(decideTests(fit2,adjust.method = "fdr",p.value = 0.05))
+```
+
+Adjust for cell type:
+
+```{r}
+targets$Cell <- make.names(targets$Cell, unique=TRUE)
+Cell_Type = factor(targets$Cell)
+targets$CleanCell <- gsub("\\.\\d+", "", targets$Cell)
+targets$CleanCell[targets$CleanCell == "T.cells"] <- "T.cell"
+targets$CleanCell <- tolower(targets$CleanCell)
+Cell_Type = factor(targets$CleanCell)
+```
+
+```{r}
+
+design <- model.matrix(~ 0 + Condition + Age + Sex + Cell_Type)
+
+
+colnames(design) <- c(levels(Condition), "Age", levels(Sex)[-1], levels(Cell_Type)[-1])
+fit1 <- lmFit(beta_subset, design)
+contMatrix1 <- makeContrasts(Post_Drug-Baseline, levels=design)
+fit2 <- contrasts.fit(fit1, contMatrix1)
+fit2 <- eBayes(fit2)
+summary(decideTests(fit2, adjust.method="fdr", p.value=0.05))
+
+```
+
+```{r}
+#Extract Results: Use the topTable function from the limma package to extract the top differentially methylated sites.
+topResults <- topTable(fit2, coef="Post_Drug - Baseline", number=Inf)
+# Filter by Adjusted p-value
+sigResults <- topResults[topResults$adj.P.Val < 0.001,]
+
+#To view the sites with the largest increases in methylation:
+head(sigResults[order(-sigResults$logFC),])
+
+#To view the sites with the largest decreases in methylation:
+head(sigResults[order(sigResults$logFC),])
+
+sigResults$probeID <- rownames(sigResults)
+significantSites <- merge(sigResults, annotation, by="probeID", all.x=TRUE)
+
+```
+
+Setting up data 
+```{r}
+# Extracting the top CpGs using topTable
+top_cpgs <- topTable(fit2, number=Inf, coef="Post_Drug - Baseline", sort.by="p", p.value=0.05)
+
+# Filtering CpGs based on effect size and select top 1000
+selected_cpgs <- top_cpgs[abs(top_cpgs$logFC) > 0.1, ][1:1000,]
+
+# Subset betas
+selected_beta <- beta_subset[rownames(beta_subset) %in% rownames(selected_cpgs), ]
+
+selected_beta_no_na <- selected_beta[complete.cases(selected_beta), ]
+
+# Assuming selected_beta_no_na has CpGs as rows and Samples as columns
+long_data <- selected_beta_no_na %>% 
+  as.data.frame() %>%
+  rownames_to_column("CpG") %>%
+  pivot_longer(cols = -CpG, names_to = "Sample", values_to = "Beta")
+
+
+
+# Perform the left join
+#long_data <- left_join(long_data, targets, by = "Sample")
+
+```
+
+```{r}
+
+#Make the annotation dataframe for the heatmap
+heat_annot <- data.frame(
+  row.names= targets$Sample,
+  Gender= targets$genders,
+  Patient = targets$Patient,
+  Treatment= targets$Condition,
+  Tissue = targets$CleanCell
+  )
+
+
+# Define colors for annotation color bars
+patient_colors <- c("AW" = "#CEEAB9", "GF" = "#8EF9D0", "GH" = "#5BACF7", "MC" = "#E9B1F7", "NG" = "#B48BE2")
+
+ann_colors <- list(
+  Gender = c('FEMALE' = "#F21F66", 'MALE' = "#176EBD"), 
+  Patient = patient_colors,  # Use the patient_colors vector here
+  Tissue = c('monocyte' = "#999BB2", 'neutrophil' = "#99B2A8", 'pbmc' = "#385CA2", 't.cell' = "#8A5851", 'whole.blood' = "#AE8B75"),
+  Treatment = c('Baseline'= "grey", 'Post_Drug'= "black")
+)
+
+# Extracting the top CpGs using topTable
+top_cpgs <- topTable(fit2, number=Inf, coef="Post_Drug - Baseline", sort.by="p", p.value=0.05)
+
+# Filtering CpGs based on effect size and select top 1000
+selected_cpgs <- top_cpgs[abs(top_cpgs$logFC) > 0.05, ][1:5000,]
+
+# Subset betas
+selected_beta <- beta_subset[rownames(beta_subset) %in% rownames(selected_cpgs), ]
+
+selected_beta_no_na <- selected_beta[complete.cases(selected_beta), ]
+# Calculate variable of each CpG across all samples(all subjects, all tissue types)
+library(matrixStats)
+CpG_Var <- matrixStats::rowVars(selected_beta_no_na)
+rankVar <- data.frame('order' = rank(-CpG_Var), 'var'= CpG_Var)
+rankVar$top10000 <- ifelse(rankVar$order <= 5000, 'Yes', 'No')
+ggpubr::ggscatter(rankVar, x= 'order', y= 'var', color= 'top10000', palette= c('black', 'red') )
+
+# Get rank of CpGs by
+rankvar= rank(-CpG_Var)
+
+
+# top 10,000 cpgs
+data.topvar <- selected_beta_no_na[rankVar$top10000 == 'Yes',]
+data.topvar <- as.matrix(data.topvar)
+
+
+#6 blocks of 8 if plotting by chip there might not be enough cpg's 
+pheatmap(
+  data.topvar,
+  annotation_names_col= T,
+  show_rownames= FALSE, #CpGs
+  show_colnames= TRUE, #Samples
+  annotation_col= heat_annot, 
+  #annotation_row= row_annot,
+  annotation_colors= ann_colors,
+  cluster_cols= TRUE,
+  color= colorRampPalette(c("yellow", "blue"))(1024),
+  clustering_distance_rows= "manhattan",
+  clustering_distance_colors= "manhattan",
+  clustering_method= "average",
+  border_color= NA,
+  fontsize= 13
+)
+
+```
+
+Use this heatmap
+```{r}
+# Make the annotation dataframe for the heatmap with 'Patient' column
+heat_annot <- data.frame(
+  row.names = targets$Sample,
+  Gender = targets$genders,
+  Treatment= targets$Condition,
+  Patient = targets$Patient,  # Changed Treatment to Patient
+  Tissue = targets$CleanCel
+)
+
+# Order the heat_annot dataframe by Gender
+heat_annot <- heat_annot[order(heat_annot$Gender), ]
+# Define colors for annotation color bars
+patient_colors <- c("AW" = "#CEEAB9", "GF" = "#8EF9D0", "GH" = "#5BACF7", "MC" = "#E9B1F7", "NG" = "#B48BE2")
+
+ann_colors <- list(
+  Gender = c('FEMALE' = "#F21F66", 'MALE' = "#176EBD"), 
+  Treatment = c('Baseline'= "grey", 'Post_Drug'= "black"),
+  Patient = patient_colors,  # Use the patient_colors vector here
+  Tissue = c('monocyte' = "#999BB2", 'neutrophil' = "#99B2A8", 'pbmc' = "#385CA2", 't.cell' = "#8A5851", 'whole.blood' = "#AE8B75")
+)
+
+# Extracting the top CpGs using topTable
+top_cpgs <- topTable(fit2, number=Inf, coef="Post_Drug - Baseline", sort.by="p", p.value=0.05)
+
+# Filtering CpGs based on effect size and select top 1000
+selected_cpgs <- top_cpgs[abs(top_cpgs$logFC) > 0.05, ][1:10000,]
+
+# Subset betas
+selected_beta <- beta_subset[rownames(beta_subset) %in% rownames(selected_cpgs), ]
+
+selected_beta_no_na <- selected_beta[complete.cases(selected_beta), ]
+# Calculate variable of each CpG across all samples(all subjects, all tissue types)
+library(matrixStats)
+CpG_Var <- matrixStats::rowVars(selected_beta_no_na)
+rankVar <- data.frame('order' = rank(-CpG_Var), 'var'= CpG_Var)
+rankVar$top10000 <- ifelse(rankVar$order <= 10000, 'Yes', 'No')
+ggpubr::ggscatter(rankVar, x= 'order', y= 'var', color= 'top10000', palette= c('black', 'red') )
+
+# Get rank of CpGs by
+rankvar= rank(-CpG_Var)
+
+#colnames(selected_beta_no_na) <- targets$Patient[match(colnames(selected_beta_no_na), targets$Sample)]
+
+# top 10,000 cpgs
+data.topvar <- selected_beta_no_na[rankVar$top10000 == 'Yes',]
+data.topvar <- as.matrix(data.topvar)
+#(selected_beta_no_na) <- targets$Patient[match(colnames(selected_beta_no_na), targets$Sample)]
+
+
+
+# Reorder the columns of data.topvar to match the order of heat_annot by Gender
+#data.topvar <- data.topvar[, heat_annot$row.names]
+
+#6 blocks of 8 if plotting by chip there might not be enough cpg's 
+pheatmap(
+  data.topvar,
+  annotation_names_col= T,
+  show_rownames= FALSE, #CpGs
+  show_colnames= FALSE, #Samples
+  annotation_col= heat_annot, 
+  #annotation_row= row_annot,
+  annotation_colors= ann_colors,
+  cluster_cols= TRUE,
+  color= colorRampPalette(c("yellow", "blue"))(1024),
+  clustering_distance_rows= "manhattan",
+  clustering_distance_colors= "manhattan",
+  clustering_method= "average",
+  border_color= NA,
+  fontsize= 13
+)
+```
+Trying to now use RPMM clustering
+```{r}
+
+sample_names <- colnames(beta_subset)
+getRPMMClustLabels <- function(rpmmObject, Y_inv=NULL) {
+  #'@description Extracts RPMM hard cluster labels
+  #'@param rpmmObject RPMM object
+  #'@param Y_inv Optional. Input matrix for RPMM computation. If provided, the sample name will be updated
+  
+  hardLabels <- blcTreeLeafClasses(rpmmObject);
+  hardLabels <- as.data.frame(hardLabels);
+  colnames(hardLabels) <- "RPMMClusters";
+  if(! is.null(Y_inv)) rownames(hardLabels) <- hardLabels$Sample_Name <- rownames(Y_inv);
+  return(hardLabels);
+}
+
+getRPMMSampOrder <- function(rpmmClusters, Y_inv) {
+  #'@description Retrieves sample orders fo heat map visualization
+  #'@describeIn Hinoue et al. online tutorial
+  #'@param rpmmClusters data.frame with row.names = sample ID & 1 column named RPMM with cluster assignments
+  #'@param Y_inv Input matrix for RPMM computation
+  
+  sampOrder <- c();
+  for(r in names(table(rpmmClusters$RPMM))) {
+    samps <- rownames(rpmmClusters)[rpmmClusters$RPMM == r];
+    clu <- t(Y_inv[samps, ]);
+    s_i <- seriation::seriate(clu, margin = 2)
+    so_i <- seriation::get_order(s_i, dim = 2)
+    sampOrder <- c(sampOrder, samps[so_i]);
+  }
+  sampOrder <- data.frame(
+    Sample_Name = sampOrder,
+    RPMMSampleOrder = 1:length(sampOrder)
+  );
+  return(sampOrder);
+}
+
+samples_data = t((selected_beta_no_na))
+sup_rpmm <- blcTree(samples_data, verbose=1, maxlevel=2); 
+  print(sup_rpmm);
+
+  ## Extract RPMM cluster labels:
+  rpmmClusters <- getRPMMClustLabels(sup_rpmm, samples_data);
+  
+  ## Retrieve RPMM sample order:
+  sampOrders <- getRPMMSampOrder(rpmmClusters, samples_data);  
+
+  ## Export:
+  dat_sup <- merge(rpmmClusters, sampOrders, by="Sample_Name");
+  write.csv(dat_sup, file= "RPMM_clustering_results.csv")
+
+RPMM <- dat_sup[,-1]
+
+targets <- merge(targets, dat_sup, by.x= "Sample", by.y= "Sample_Name")
+
+# Make the annotation dataframe for the heatmap with 'Patient' column
+heat_annot <- data.frame(
+  `RPMM Clusters` = targets$RPMMClusters,
+  Tissue = targets$CleanCel,
+  row.names = targets$Sample,
+  Gender = targets$genders,
+  Treatment= targets$Condition,
+  Patient = targets$Patient  # Changed Treatment to Patient
+)
+
+# Define colors for annotation color bars
+patient_colors <- c("AW" = "#CEEAB9", "GF" = "#8EF9D0", "GH" = "#5BACF7", "MC" = "#E9B1F7", "NG" = "#B48BE2")
+
+ann_colors <- list(
+  Gender = c('FEMALE' = "#F21F66", 'MALE' = "#176EBD"), 
+  Treatment = c('Baseline'= "grey", 'Post_Drug'= "black"),
+  Patient = patient_colors,  # Use the patient_colors vector here
+  Tissue = c('monocyte' = "#999BB2", 'neutrophil' = "#99B2A8", 'pbmc' = "#385CA2", 't.cell' = "#8A5851", 'whole.blood' = "#AE8B75"),
+  `RPMM Clusters` = c('rLL' = '#506C58', 'rLR' = '#76EBF2', 'rRL' = '#58085B', 'rRR' = '#FFA791')
+)
+
+# Create an ordered vector of sample names based on the RPMM cluster order
+ordered_sample_names <- targets$Sample[order(targets$CleanCell)]
+
+# Ensure that your data matrix has samples as columns and CpGs as rows
+# If it's not already like that, you might need to transpose it
+# data.topvar <- t(data.topvar)
+
+# Reorder the columns of your data matrix to match the order of the samples
+ordered_data <- data.topvar[, ordered_sample_names]
+
+# Generate the heatmap with ordered data
+# Define the size of the plot
+width <- 10 # width in inches
+height <- 10 # height in inches
+filename <- "/Users/adiallo/Desktop/Clustering_Heatmap.png"
+
+# Open a file to plot to
+png(filename, width = width, height = height, units = "in", res = 300)
+
+# Assuming data_matrix is your methylation data matrix and you want to set new column names
+#colnames(ordered_data) <- targets$SubjectID
+# Generate the heatmap
+
+pheatmap(
+  ordered_data,
+  annotation_col = heat_annot[ordered_sample_names, ],
+  annotation_colors = ann_colors,
+  color = colorRampPalette(c("yellow", "blue"))(1024),
+  border_color = NA,
+  fontsize = 10,
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  cluster_cols = FALSE
+)
+
+# Close the file
+dev.off()
+
+
+```
+
+Heatmaps for cell types:
+```{r}
+# Make the annotation dataframe for the heatmap with 'Patient' column
+heat_annot <- data.frame(
+  `RPMM Clusters` = targets$RPMMClusters,
+  Tissue = targets$CleanCel,
+  row.names = targets$Sample,
+  Gender = targets$genders,
+  Treatment= targets$Condition,
+  Patient = targets$Patient  # Changed Treatment to Patient
+)
+
+# Define colors for annotation color bars
+patient_colors <- c("AW" = "#CEEAB9", "GF" = "#8EF9D0", "GH" = "#5BACF7", "MC" = "#E9B1F7", "NG" = "#B48BE2")
+
+ann_colors <- list(
+  Gender = c('FEMALE' = "#F21F66", 'MALE' = "#176EBD"), 
+  Treatment = c('Baseline'= "grey", 'Post_Drug'= "black"),
+  Patient = patient_colors,  # Use the patient_colors vector here
+  Tissue = c('monocyte' = "#999BB2", 'neutrophil' = "#99B2A8", 'pbmc' = "#385CA2", 't.cell' = "#8A5851", 'whole.blood' = "#AE8B75"),
+  `RPMM Clusters` = c('rLL' = '#506C58', 'rLR' = '#76EBF2', 'rRL' = '#58085B', 'rRR' = '#FFA791')
+)
+
+# Create an ordered vector of sample names based on the RPMM cluster order
+ordered_sample_names <- targets$Sample[order(targets$CleanCell)]
+# Function to generate heatmap for a given tissue
+generate_heatmap_for_tissue <- function(tissue_name, data, annotation, ann_colors) {
+  tissue_data <- data[annotation$Tissue == tissue_name, ]
+  tissue_annotation <- annotation[annotation$Tissue == tissue_name, ]
+  
+  heatmap_filename <- paste0("/Users/adiallo/Desktop/heatmap_", tissue_name, ".png")
+  png(heatmap_filename, width = 800, height = 600)  # Adjust size as needed
+  
+  pheatmap(
+    tissue_data,
+    annotation_col = tissue_annotation,
+    annotation_colors = ann_colors,
+    cluster_cols = TRUE,
+    show_rownames = FALSE,
+    show_colnames = FALSE,
+    color = colorRampPalette(c("yellow", "blue"))(1024),
+    clustering_distance_rows = "manhattan",
+    clustering_distance_cols = "manhattan",
+    clustering_method = "average",
+    border_color = NA,
+    fontsize = 13
+  )
+  
+  dev.off() # Close the device
+}
+
+# Now, you can call this function for each tissue type
+tissues <- c('monocyte', 'neutrophil', 'pbmc', 't.cell', 'whole.blood')
+
+for(tissue in tissues) {
+  generate_heatmap_for_tissue(tissue, data.topvar, heat_annot, ann_colors)
+}
+```
+
+
+Generating plots of celltype proportions 
+```{r}
+# Convert your matrix to a data frame in long format
+df <- as.data.frame(Pred_EPIC)
+df$Sample <- rownames(df)
+long_df <- tidyr::gather(df, CellType, Proportion, -Sample)
+
+# Add patient information
+long_df$Patient <- targets$Patient[match(long_df$Sample, rownames(Pred_EPIC))]
+
+# Create a boxplot
+p <- ggplot(long_df, aes(x = CellType, y = Proportion, color = Patient)) +
+  geom_boxplot(outlier.shape = NA) + # do not show outliers twice
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Cell Type Proportions by Patient", y = "Proportion (%)", x = "Cell Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+options(repr.plot.width=20, repr.plot.height=20)
+print(p)
+```
+
+Gnerating average plots
+```{r}
+# Create the plot with points
+p <- ggplot(long_df, aes(x=CellType, y=Proportion)) +
+  geom_point(position = position_jitter(width = 0.2), aes(color=CellType), size=1) +  # jittered points
+  theme_minimal() +
+  labs(title="Scatter Plot of Cell Types") +
+  facet_wrap(~Patient)  # separate plot for each patient
+
+# Display the plot with custom dimensions
+options(repr.plot.width=12, repr.plot.height=6)
+print(p)
+```
+
+
+```{r}
+# Convert your matrix to a data frame in long format
+df <- as.data.frame(Pred_EPIC)
+df$Sample <- rownames(df)
+long_df <- tidyr::gather(df, CellType, Proportion, -Sample)
+
+# Add patient information
+long_df$Patient <- targets$Patient[match(long_df$Sample, rownames(Pred_EPIC))]
+
+# Average the Proportion for each Patient and CellType combination
+library(dplyr)
+long_df_avg <- long_df %>%
+  group_by(Patient, CellType) %>%
+  summarise(Proportion = mean(Proportion, na.rm = TRUE)) %>%
+  ungroup()
+
+# Create a plot using only points for the averaged data
+p <- ggplot(long_df_avg, aes(x = CellType, y = Proportion, color = Patient)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Averaged Cell Type Proportions by Patient", y = "Proportion (%)", x = "Cell Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+options(repr.plot.width=20, repr.plot.height=20)
+print(p)
+
+
+```
+Showing both baseline and post-drug
+```{r}
+
+# Add condition information to the reshaped dataframe
+long_df$Condition <- targets$Condition[match(long_df$Sample, rownames(Pred_EPIC))]
+
+# Group by Patient, CellType, and Condition to compute average proportions
+long_df_avg <- long_df %>%
+  group_by(Patient, CellType, Condition) %>%
+  summarise(Proportion = mean(Proportion, na.rm = TRUE)) %>%
+  ungroup()
+
+# Plot the data using points and distinguish between pre and post drug conditions using different shapes
+p <- ggplot(long_df_avg, aes(x = CellType, y = Proportion, color = Patient, shape = Condition)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Averaged Cell Type Proportions by Patient and Condition", y = "Proportion (%)", x = "Cell Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+options(repr.plot.width=20, repr.plot.height=20)
+print(p)
+```
+
+```{r}
+# Reshape the long_df_avg to get both Baseline and Post_Drug proportions on the same row
+diff_df <- long_df_avg %>%
+  spread(key = Condition, value = Proportion) %>%
+  mutate(Difference = `Post_Drug` - `Baseline`) %>%
+  filter(!is.na(Difference))  # remove rows without a computed difference
+
+# Plot the differences
+p <- ggplot(diff_df, aes(x = CellType, y = Difference, color = Patient)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9), alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Difference in Cell Type Proportions (Post Drug - Baseline)", y = "Proportion Difference (%)", x = "Cell Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+options(repr.plot.width=20, repr.plot.height=20)
+print(p)
+
+
+```
+
+
+```{r}
+# List of cell types
+cell_types <- levels(factor(long_df$CellType))
+
+# Generate a list of plots
+plot_list <- list()
+
+for (cell in cell_types) {
+  # Filter data for the specific cell type
+  filtered_data <- long_df[long_df$CellType == cell,]
+  
+  # Create the plot for the specific cell type
+  p <- ggplot(filtered_data, aes(x = Patient, y = Proportion, fill = Patient)) +
+    geom_boxplot() +
+    labs(title = paste("Distribution of", cell), y = "Proportion (%)", x = "Patient") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Add the plot to the list
+  plot_list[[cell]] <- p
+}
+
+# Print each plot
+for (cell in cell_types) {
+  print(plot_list[[cell]])
+}
+p <- ggplot(long_df, aes(x = Patient, y = Proportion, fill = Patient)) +
+  geom_boxplot() +
+  labs(title = "Distribution of Cell Types", y = "Proportion (%)", x = "Patient") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4)  # Use facet_wrap to create a facet for each cell type
+
+print(p)
+
+
+```
+
+
+```{r}
+# Reshape the long_df_avg to get both Baseline and Post_Drug proportions on the same row
+diff_df <- long_df_avg %>%
+  spread(key = Condition, value = Proportion) %>%
+  mutate(Difference = `Post_Drug` - `Baseline`) %>%
+  filter(!is.na(Difference))  # remove rows without a computed difference
+
+# Adjusting the plotting loop to work with diff_df
+for (cell in cell_types) {
+  # Filter data for the specific cell type
+  filtered_data <- diff_df[diff_df$CellType == cell,]
+  
+  # Create the plot for the specific cell type
+  p <- ggplot(filtered_data, aes(x = Patient, y = Difference, fill = Patient)) +
+    geom_boxplot() +
+    labs(title = paste("Difference in", cell, "(Post Drug - Baseline)"), y = "Proportion Difference (%)", x = "Patient") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Add the plot to the list
+  plot_list_diff[[cell]] <- p
+}
+
+# Print each plot
+for (cell in cell_types) {
+  print(plot_list_diff[[cell]])
+}
+
+p <- ggplot(diff_df, aes(x = Patient, y = Difference, color = Patient)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9), alpha = 0.5) +
+  labs(title = "Difference in Cell Types (Post Drug - Baseline)", y = "Proportion Difference (%)", x = "Patient") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 4)  # Use facet_wrap to create a facet for each cell type
+
+print(p)
+
+
+
+```
+
+
+Need to debug this code
+```{r}
+# List of cell types
+cell_types <- levels(factor(long_df$CellType))
+library(vegan)
+# Initialize a results list
+perm_results <- list()
+
+for (cell in cell_types) {
+  # Filter data for the specific cell type and exclude NAs
+  filtered_data <- long_df[long_df$CellType == cell & !is.na(long_df$Proportion),]
+  
+  # Ensure we have more than one row to compute distances
+  if (nrow(filtered_data) > 1) {
+    # Create a distance matrix using Euclidean distance
+    dist_matrix <- vegdist(matrix(filtered_data$Proportion, ncol=1))
+    
+    # Perform PerMANOVA using adonis2
+    perm_test <- adonis2(dist_matrix ~ Patient, data=filtered_data)
+    
+    # Store the results in the list
+    perm_results[[cell]] <- perm_test
+  } else {
+    perm_results[[cell]] <- "Insufficient data for analysis"
+  }
+}
+
+# Print PerMANOVA results
+for (cell in cell_types) {
+  print(paste("PerMANOVA results for", cell))
+  print(perm_results[[cell]])
+}
+
+
+
+
+```
+
+
+```{r}
+# List of cell types
+cell_types <- levels(factor(long_df$CellType))
+
+# Initialize a results list
+perm_results <- list()
+
+for (cell in cell_types) {
+  # Filter data for the specific cell type and exclude NAs
+  filtered_data <- long_df[long_df$CellType == cell & !is.na(long_df$Proportion),]
+  
+  # Ensure we have more than one row to compute distances
+  if (nrow(filtered_data) > 1) {
+    # Add a small constant to the proportions and apply log transformation
+    transformed_proportion <- log(filtered_data$Proportion + 1e-5)
+    
+    # Create a distance matrix using Euclidean distance
+    dist_matrix <- vegdist(matrix(transformed_proportion, ncol=1))
+    
+    # Perform PerMANOVA using adonis2
+    perm_test <- adonis2(dist_matrix ~ Patient, data=filtered_data)
+    
+    # Store the results in the list
+    perm_results[[cell]] <- perm_test
+  } else {
+    perm_results[[cell]] <- "Insufficient data for analysis"
+  }
+}
+
+# Print PerMANOVA results
+for (cell in cell_types) {
+  print(paste("PerMANOVA results for", cell))
+  print(perm_results[[cell]])
+}
+
+```
+
+```{r}
+# Load required libraries
+library(vegan)
+library(ggplot2)
+
+# List of cell types
+cell_types <- levels(factor(long_df$CellType))
+
+# Initialize a results list
+perm_results <- list()
+
+# For visualization, store MDS results and data in a list
+mds_plots <- list()
+# Empty data frame to store MDS results for all cell types
+all_mds_df <- data.frame()
+
+
+for (cell in cell_types) {
+  # Use tryCatch to handle potential errors
+  result <- tryCatch({
+    
+    # Filter data for the specific cell type and exclude NAs
+    filtered_data <- long_df[long_df$CellType == cell & !is.na(long_df$Proportion),]
+    
+    # Ensure we have more than one row to compute distances
+    if (nrow(filtered_data) > 1) {
+      # Add a small constant to the proportions and apply log transformation
+      transformed_proportion <- log(filtered_data$Proportion + 1e-5)
+      
+      # Create a distance matrix using Euclidean distance
+      dist_matrix <- vegdist(matrix(transformed_proportion, ncol=1))
+      
+      # Perform PerMANOVA using adonis2
+      perm_test <- adonis2(dist_matrix ~ Patient, data=filtered_data)
+      
+      # Store the results in the list
+      perm_results[[cell]] <- perm_test
+      
+      # Compute MDS
+      mds_result <- cmdscale(dist_matrix)
+      mds_df <- as.data.frame(mds_result)
+      names(mds_df) <- c("MDS1", "MDS2")
+      mds_df$Patient <- filtered_data$Patient
+      
+      # Plot using ggplot2
+      p <- ggplot(mds_df, aes(x=MDS1, y=MDS2, color=Patient)) + 
+           geom_point(size=3) + 
+           ggtitle(paste("MDS plot for", cell)) +
+           theme_minimal()
+      mds_plots[[cell]] <- p
+    } else {
+      perm_results[[cell]] <- "Insufficient data for analysis"
+    }
+    
+      mds_df$CellType <- cell  # Add a column to store the cell type
+      all_mds_df <- rbind(all_mds_df, mds_df)  # Bind the data
+  }, error=function(e) e)
+  
+  # If an error occurred, store the error message in the results list
+  if(inherits(result, "error")) {
+    perm_results[[cell]] <- paste("Error for", cell, ":", result$message)
+  }
+}
+
+# Print and visualize results
+p <- ggplot(all_mds_df, aes(x=MDS1, y=MDS2, color=Patient)) + 
+     geom_point(size=3) + 
+     facet_wrap(~CellType, ncol=3, scales = "free_y") +  # Adjust ncol as per your preference and allow y axes to vary
+     theme_minimal()
+
+print(p)
+
+```
+Work on Manhattan plot
+```{r}
+
+library(qqman)
+# Create a vector of indices to match rownames of fit2$p.value with the rows of annotation
+matching_indices <- match(rownames(fit2$p.value), annotation$probeID)
+
+# Extract the corresponding chromosome and position data
+chromosome_data <- annotation$CpG_chrm[matching_indices]
+position_data <- annotation$CpG_beg[matching_indices]
+
+# Extract the corresponding p-values
+p_values <- fit2$p.value[, "Post_Drug - Baseline"]
+
+# Combine into a dataframe
+cpg_data <- data.frame(
+  chromosome = chromosome_data,
+  position = position_data,
+  p.value = p_values
+)
+
+# Check the first few rows of cpg_data to ensure it looks correct
+head(cpg_data)
+
+# Remove 'chr' prefix from the chromosome column
+cpg_data$chromosome <- gsub("chr", "", cpg_data$chromosome)
+
+# Convert 'X', 'Y', and 'MT' to numeric values
+cpg_data$chromosome[cpg_data$chromosome == "X"] <- "23"
+cpg_data$chromosome[cpg_data$chromosome == "Y"] <- "24"
+cpg_data$chromosome[cpg_data$chromosome == "MT"] <- "25"
+
+# Convert chromosome to numeric
+cpg_data$chromosome <- as.numeric(cpg_data$chromosome)
+
+# Check for NA values again after the conversion
+sum(is.na(cpg_data$chromosome))
+
+# Calculate -log10(p-value) for the Manhattan plot
+cpg_data$minuslog10p <- -log10(cpg_data$p.value)
+
+threshold <- -log10(5e-2)  # The genome-wide significance line
+significant_points <- cpg_data[cpg_data$minuslog10p > threshold, ]
+
+# Remove any rows with NA or infinite p-values
+cpg_data <- cpg_data[!is.na(cpg_data$minuslog10p) & !is.infinite(cpg_data$minuslog10p), ]
+cpg_data$SNP <- rownames(cpg_data)
+# Now create the Manhattan plot
+# Assuming no NA values, run the manhattan function again
+manhattan(cpg_data,
+          chr = "chromosome",
+          bp = "position",
+          p = "minuslog10p",
+          col = c("blue4", "orange3"),
+          main = "Manhattan Plot for Differential Methylation",
+          ylim = c(0, max(cpg_data$minuslog10p, na.rm = TRUE)),
+          suggestiveline = -log10(1e-4),
+          genomewideline = -log10(5e-2),
+          annotatePval = 0.01
+)
+#with(significant_points, text(position, minuslog10p, labels=rownames(significant_points), pos=3, cex=0.6))
+
+
+
+```
+
+Work on later
+```{r}
+# Install and load the package
+#install.packages("table1")
+
+
+PATIENT = NULL
+#Setting up my Sex category so that the names make sense
+PATIENT$PATIENT_SEX <- 
+  factor(targets$genders, levels=c('MALE','FEMALE'),
+         labels=c("Male", 
+                  "Female"))
+
+PATIENT$flag = factor(targets$Patient)
+
+#PATIENT$NUMBER_of_patients = length(unlist(levels(factor(targets$Patient))))
+PATIENT$AGE = signif(targets$age, digits = 0)
+PATIENT$AGE = factor(PATIENT$AGE, levels = c(20,30,40,50))
+PATIENT$ETHNICITY = factor(targets$ethnicity, levels = "WHITE",labels = "White")
+PATIENT$TIMEPOINT = factor(targets$TimePoint, levels = c(0,1,2), labels=c("Baseline","On Treatment First Timepoint","On Treatment Second Timepoint"))
+PATIENT$CONDITION = factor(targets$Condition, levels = c("Baseline", "Post_Drug"), labels = c("Baseline", "Post Drug"))
+PATIENT$TISSUE = factor(targets$CleanCell, levels = c("monocyte","neutrophil","pbmc","t.cell","whole.blood"), labels = c("monocyte","neutrophil","pbmc","t-cell","whole blood"))
+
+#label(PATIENT$NUMBER_of_patients) <- "Number of Patients"
+label(PATIENT$PATIENT_SEX)       <- "Sex"
+label(PATIENT$AGE)       <- "Age"
+label(PATIENT$ETHNICITY)     <- "Race"
+label(PATIENT$TIMEPOINT) <- "Time Point"
+label(PATIENT$CONDITION) <- "Condition"
+label(PATIENT$TISSUE) <- "Tissue"
+caption  <- "Table 1: Patient characteristics (age, sex, ethnicity, timepoint, condition)."
+footnote <- "On treatment indicates that the patient is on modulator therapy. N is the total number of samples."
+
+#Setting up my units
+units(PATIENT$AGE) <- "years"
+
+# create a table1 object stratified by NSTEMI diagnosis
+mytable = table1(~ AGE + PATIENT_SEX + TIMEPOINT + TISSUE + CONDITION, data=PATIENT,
+    overall=c(left="Total"), caption=caption, footnote=footnote)
+
+# print the table
+mytable
+
+```
+Sort of works
+```{r}
+patient_data <- targets %>%
+  group_by(Patient) %>%
+  summarise(
+    Age = mean(age, na.rm = TRUE),
+    Sex = first(genders),
+    Ethnicity = first(ethnicity),
+    Baseline_monocyte = sum(CleanCell == "monocyte" & TimePoint == 0, na.rm = TRUE),
+    OnTreatmentFirst_monocyte = sum(CleanCell == "monocyte" & TimePoint == 1, na.rm = TRUE),
+    OnTreatmentSecond_monocyte = sum(CleanCell == "monocyte" & TimePoint == 2, na.rm = TRUE),
+    Baseline_neutrophil = sum(CleanCell == "neutrophil" & TimePoint == 0, na.rm = TRUE),
+    OnTreatmentFirst_neutrophil = sum(CleanCell == "neutrophil" & TimePoint == 1, na.rm = TRUE),
+    OnTreatmentSecond_neutrophil = sum(CleanCell == "neutrophil" & TimePoint == 2, na.rm = TRUE),
+    Baseline_pbmc = sum(CleanCell == "pbmc" & TimePoint == 0, na.rm = TRUE),
+    OnTreatmentFirst_pbmc = sum(CleanCell == "pbmc" & TimePoint == 1, na.rm = TRUE),
+    OnTreatmentSecond_pbmc = sum(CleanCell == "pbmc" & TimePoint == 2, na.rm = TRUE),
+    Baseline_tCell = sum(CleanCell == "t.cell" & TimePoint == 0, na.rm = TRUE),
+    OnTreatmentFirst_tCell = sum(CleanCell == "t.cell" & TimePoint == 1, na.rm = TRUE),
+    OnTreatmentSecond_tCell = sum(CleanCell == "t.cell" & TimePoint == 2, na.rm = TRUE),
+    Baseline_whole_blood = sum(CleanCell == "whole.blood" & TimePoint == 0, na.rm = TRUE),
+    OnTreatmentFirst_whole_blood  = sum(CleanCell == "whole.blood" & TimePoint == 1, na.rm = TRUE),
+    OnTreatmentSecond_whole_blood  = sum(CleanCell == "whole.blood" & TimePoint == 2, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+patient_data <- patient_data %>%
+  mutate(CellTypeSummary = paste(
+    "Monocytes (Baseline/1st/2nd):", Baseline_monocyte, "/", OnTreatmentFirst_monocyte, "/", OnTreatmentSecond_monocyte,
+    "; Neutrophils (Baseline/1st/2nd):", Baseline_neutrophil, "/", OnTreatmentFirst_neutrophil, "/", OnTreatmentSecond_neutrophil,
+    "; PBMC (Baseline/1st/2nd):", Baseline_pbmc, "/", OnTreatmentFirst_pbmc, "/", OnTreatmentSecond_pbmc,
+    "; T-Cell (Baseline/1st/2nd):", Baseline_tCell, "/", OnTreatmentFirst_tCell, "/", OnTreatmentSecond_tCell,
+    "; Whole Blood (Baseline/1st/2nd):", Baseline_whole_blood, "/", OnTreatmentFirst_whole_blood, "/", OnTreatmentSecond_whole_blood,
+    sep = " "
+  ))
+
+caption  <- "Table 1: Patient characteristics (age, sex, ethnicity, timepoint, condition)."
+footnote <- "On treatment indicates that the patient is on modulator therapy. N is the total number of patients."
+
+# Create a table1 object with patient data
+mytable <- table1(~ Age + Sex + Ethnicity + CellTypeSummary, 
+                  data = patient_data,
+                  overall = c(left = "Total"), 
+                  caption = caption, 
+                  footnote = footnote)
+
+# Print the table
+print(mytable)
+
+```
+
+```{r}
+patient_data <- targets %>%
+  group_by(Patient, CleanCell) %>%
+  summarise(
+    Age = first(age),
+    Sex = first(genders),
+    Ethnicity = first(ethnicity),
+    Baseline = sum(TimePoint == 0, na.rm = TRUE),
+    OnTreatmentFirst = sum(TimePoint == 1, na.rm = TRUE),
+    OnTreatmentSecond = sum(TimePoint == 2, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  pivot_longer(
+    cols = starts_with("OnTreatment"),
+    names_to = "TreatmentTimePoint",
+    values_to = "Count",
+    names_prefix = "OnTreatment"
+  ) %>%
+  pivot_wider(
+    id_cols = c(Patient, Age, Sex, Ethnicity, CleanCell),
+    names_from = TreatmentTimePoint,
+    values_from = Count
+  ) %>%
+  replace(is.na(.), 0) # Replace NAs with 0 if needed
+
+# Now you can create a summary for each patient and cell type
+cell_type_summary <- patient_data %>%
+  group_by(Patient) %>%
+  summarise(
+    CellTypeSummary = paste(CleanCell,
+                            "(Baseline:", Baseline,
+                            "/1st:", First,
+                            "/2nd:", Second, ")",
+                            collapse = "; "),
+    .groups = 'drop'
+  )
+
+# Combine the cell type summary with the patient details
+final_patient_data <- patient_data %>%
+  select(Patient, Age, Sex, Ethnicity) %>%
+  distinct() %>%
+  left_join(cell_type_summary, by = "Patient")
+
+# Use table1 or another method to create your table
+mytable <- table1(~ Age + Sex + Ethnicity + CellTypeSummary, 
+                  data = final_patient_data,
+                  overall = c(left = "Total"), 
+                  caption = caption, 
+                  footnote = footnote)
+
+# Print the table
+print(mytable)
+
+
+```
+
+
+Works
+```{r}
+# Convert row names of top_cpgs to a column if they are not already
+top_cpgs$probeID <- rownames(top_cpgs)
+
+# Merge top_cpgs with the annotation based on probeID
+annotated_cpgs <- merge(top_cpgs, annotation, by.x = "probeID", by.y = "probeID")
+
+# Select only the relevant columns for further analysis
+annotated_cpgs <- annotated_cpgs[, c("probeID", "logFC", "P.Value", "adj.P.Val", "gene", "gene_HGNC", "CpG_chrm", "CpG_beg", "CpG_end")]
+
+# Check the first few rows to confirm the merge worked as expected
+head(annotated_cpgs)
+library(writexl)
+write_xlsx(annotated_cpgs, "/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Bulk_ATAC/peaks/annotated_cpgs.xlsx")
+
+```
+
+Using M values in place of beta values
+```{r}
+library(minfi)
+library(limma)
+
+# Read and preprocess the data
+rgSet <- read.metharray.exp(base = idat)
+rgSet <- preprocessNoob(rgSet)
+MValues <- getM(rgSet)
+# Ensure MValues is a matrix
+MValues <- as.matrix(MValues)
+design <- model.matrix(~ Condition + Age + Sex + Cell_Type, data = targets)
+
+# Fit linear model initially without the correlation structure
+fit_initial <- lmFit(MValues, design)
+
+# Estimate the correlation structure
+corfit <- duplicateCorrelation(fit_initial, design, block=targets$Patient)
+
+# Re-run lmFit with the estimated correlation structure
+fit <- lmFit(MValues, design, block=targets$Patient, correlation=corfit$consensus)
+
+# Apply contrasts
+contMatrix <- makeContrasts(ConditionPost_Drug, levels=design)
+fit <- contrasts.fit(fit, contMatrix)
+fit <- eBayes(fit)
+
+# Extracting top CpGs
+top_cpgs <- topTable(fit)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

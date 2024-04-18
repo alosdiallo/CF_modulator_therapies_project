@@ -1,0 +1,286 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+https://bioinformatics-core-shared-training.github.io/Quantitative-ChIPseq-Workshop/articles/Quantitative-ChIPseq-Workshop.html#sneak-peak-profile-plots-coming-in-diffbind-3-2
+
+chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://bioconductor.org/packages/devel/bioc/vignettes/DiffBind/inst/doc/DiffBind.pdf
+https://www.cruk.cam.ac.uk/core-facilities/bioinformatics-core/software/DiffBind
+
+https://www.biostars.org/p/464336/
+
+chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://bioconductor.org/packages/release/bioc/manuals/DiffBind/man/DiffBind.pdf
+
+chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://bioinformatics-core-shared-training.github.io/cruk-autumn-school-2017/ChIP/Materials/Practicals/Practical9_diffbind_DB.pdf
+
+https://www.biostars.org/p/9481471/#9525663
+
+```{r message=FALSE, warning=FALSE}
+library(DiffBind)
+library(DESeq2)
+library(ChIPpeakAnno)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db)
+library(writexl)
+library(profileplyr)
+getwd()
+
+```
+
+
+
+Loading the peak files and building the DBA object. 
+```{r}
+# Set the working directory
+setwd("/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Bulk_ATAC/peaks")
+
+library(readxl)
+# Read in the sample sheet
+samples <- read_excel("~/Desktop/Dartmouth/Christiansen_lab/CF_Project/Bulk_ATAC/samples.xlsx")
+
+# The path of directory to read peak files from
+directory_peaks <- "/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Bulk_ATAC/peaks"
+
+
+
+# The path of directory to read bam files from
+directory_bams <- "/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Bulk_ATAC/bams/sorted"
+
+# Sample Names to be derived from the peak file names
+sampleNames <- samples$SampleID
+
+# Create the full paths to the peak and count files
+peakFiles <- file.path(samples$Peaks)
+bamReads <- file.path(directory_bams, samples$bamReads)
+
+head(peakFiles)
+
+# You can also check if the files exist
+file.exists(head(peakFiles))
+# Check if peak files exist and have non-zero size
+#validPeaks <- sapply(peakFiles, function(file) file.exists(file) && file.info(file)$size > 0)
+#validPeaks
+# Filter the sample sheet and peak files based on valid peaks
+#samples <- samples[validPeaks, ]
+#peakFiles <- peakFiles[validPeaks]
+
+
+# Add the sample sheet to the DBA object
+dba <- dba(sampleSheet = samples)
+par(mar = c(2, 2, 2, 2)) 
+plot(dba)
+
+dba = dba.count(dba)
+# Set the peak files for the DBA object
+#dba <- dba.peakset(dba, peaks = peakFiles)
+dba = dba.normalize(dba) 
+dba
+dba = dba.contrast(dba,reorderMeta=list(Condition="OnTreatment"))
+
+
+dba = dba.analyze(dba)
+plot(dba, contrast=11)
+
+
+dba.DR <- dba.report(dba)
+dba.DR 
+
+# To see any of the others just specify it like this: dba.report(dba, contrast=9)
+
+
+dba.plotPCA(dba,DBA_TISSUE,label=DBA_CONDITION)
+ dba.plotPCA(dba, contrast=11, label=DBA_TISSUE)
+ 
+dba.plotMA(dba)
+ 
+dba.plotHeatmap(dba) 
+ dba.plotVolcano(dba,contrast=11)
+ 
+ box_plot_results = dba.plotBox(dba,contrast=11,notch = FALSE)
+ boxplot(box_plot_results)
+```
+Trying to make a heatmap using the data from the comparison between the atac and methylation data
+```{r}
+gene_list <- rownames(atac_matrix)
+dba.show(dba, bContrasts=TRUE)
+atac_report <- dba.report(dba, contrast=11)
+filtered_atac_report <- atac_report[atac_report$GeneSymbol %in% gene_list, ]
+combined_peak_anno <- do.call(c, peak_annos)
+
+library(GenomicRanges)
+gene_symbols <- mcols(combined_peak_anno)$SYMBOL
+mcols(combined_peak_anno)$GeneSymbol <- gene_symbols
+# Assuming 'dba' object has gene information
+# You need to adjust this based on how your dba object is structured
+filtered_atac_data <- dba[dba$gene %in% gene_list, ]
+
+```
+
+```{r}
+selected_tissue <- "WB"
+subset_indices <- which(dba$samples$Tissue == selected_tissue)
+samples_subset <- samples[subset_indices, ]
+dba_subset <- dba(sampleSheet = samples_subset)
+dba_subset <- dba.count(dba_subset)
+dba.plotPCA(dba_subset, DBA_CONDITION, label=DBA_TISSUE)
+
+```
+
+
+```{r}
+# List of tissues
+tissues <- unique(dba$samples$Tissue)
+
+# Loop through each tissue and generate PCA plot
+for (selected_tissue in tissues) {
+  cat("Generating PCA plot for:", selected_tissue, "\n")
+  
+  # Subset the data for the current tissue
+  subset_indices <- which(dba$samples$Tissue == selected_tissue)
+  samples_subset <- samples[subset_indices, ]
+  
+  # Create a DBA object for the subset
+  dba_subset <- dba(sampleSheet = samples_subset)
+  dba_subset <- dba.count(dba_subset)
+  
+  # Plot PCA for the subset
+  pca_plot <- dba.plotPCA(dba_subset, DBA_CONDITION, label=DBA_TISSUE)
+  print(pca_plot)
+  
+  # Optionally, you can save the plot to a file if required
+  # ggsave(filename = paste0("PCA_", selected_tissue, ".png"), plot = pca_plot)
+}
+
+```
+
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Initialize a list to store the annotated peak data
+peak_annos <- list()
+
+# Loop over the files
+for (i in seq_along(peakFiles)) {
+  # Read the peak file
+  peak <- readPeakFile(peakFiles[i])
+  
+  # Annotate the peaks
+  peak_anno <- annotatePeak(peak, tssRegion=c(-3000, 3000), 
+                         TxDb=TxDb.Hsapiens.UCSC.hg19.knownGene, 
+                         annoDb="org.Hs.eg.db")
+  
+  # Store the annotated peak data in the list
+  peak_annos[[i]] <- peak_anno
+}
+```
+
+
+
+
+
+
+
+Performing a full differential binding analysis can be accomplished in asinglestep based on the sample sheet:
+
+```{r}
+peak_anno_two <- annotatePeak(dba.DR, tssRegion=c(-3000, 3000), 
+                         TxDb=TxDb.Hsapiens.UCSC.hg19.knownGene, 
+                         annoDb="org.Hs.eg.db")
+
+
+```
+```{r}
+# Convert the annotated peak object to a data frame
+peak_anno_df <- as.data.frame(peak_anno_two)
+
+write_xlsx(peak_anno_df, "/Users/adiallo/Desktop/Dartmouth/Christiansen_lab/CF_Project/Bulk_ATAC/peaks/peak_anno_df.xlsx")
+
+```
+
+
+```{r}
+library(pathview)
+library(biomaRt)
+
+
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+cf_genes <- getBM(attributes=c('external_gene_name', 'ensembl_gene_id'),
+                  filters='external_gene_name',
+                  values=c('CFTR'),
+                  mart=mart)
+
+```
+
+```{r}
+
+Monocytes_mask = dba$masks[["Neutrophils"]]
+mask.Baseline <- dba$masks$Baseline
+mask.OnTreatment <- dba$masks$OnTreatment
+
+profiles <- dba.plotProfile(dba, samples=list(Baseline = Monocytes_mask & mask.Baseline,OnTreatment = Monocytes_mask & mask.OnTreatment), merge=NULL)
+
+
+
+dba.show(dba, bContrasts=TRUE)
+
+
+dba.plotProfile(profiles)
+```
+
+
+```{r}
+# Function to create profile plots for each cell type
+plot_profiles_for_cell_types <- function(cell_type) {
+  
+  #cell_type = "T cells"
+  cell_type_mask = dba$masks[[cell_type]]
+  mask.Baseline <- dba$masks$Baseline
+  mask.OnTreatment <- dba$masks$OnTreatment
+
+  profiles <- dba.plotProfile(dba, samples=list(Baseline = cell_type_mask & mask.Baseline,OnTreatment = cell_type_mask & mask.OnTreatment), merge=NULL)
+  # Return profile 
+  return(profile)
+}
+
+# Use the function to create profile plots for all cell types
+types_of_cells = NULL
+types_of_cells = c("T cells","Monocytes","Neutrophils","PBMC","WB")
+type_of_cell = "T cells"
+for(i in 1:length(types_of_cells)){
+  profile <- plot_profiles_for_cell_types(types_of_cells[i])
+  dba.plotProfile(profile)
+}
+#profile <- plot_profiles_for_cell_types(type_of_cell)
+
+#dba.plotProfile(profiles)
+
+
+```
+
+```{r}
+
+selected_tissue <- "Monocytes"
+subset_indices <- which(dba$samples$Tissue == selected_tissue)
+samples_subset <- samples[subset_indices, ]
+dba_subset <- dba(sampleSheet = samples_subset)
+dba_subset <- dba.count(dba_subset)
+dba_subset = dba.normalize(dba_subset) 
+dba
+dba_subset = dba.contrast(dba_subset,reorderMeta=list(Condition="OnTreatment"))
+
+
+dba_subset = dba.analyze(dba_subset)
+dba.show(dba_subset, bContrasts=TRUE)
+dba.plotVolcano(dba_subset,contrast = 1)
+
+
+
+
+
+#dba.show(dba, bContrasts=TRUE)
+
+#dba.plotVolcano(dba,contrast = 11)
+```
+
